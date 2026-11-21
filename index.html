@@ -1171,6 +1171,8 @@ So antwortest du:
 ${KNOWLEDGE}`;
 
 const QUICK = [
+  "Wie erhalte ich Muskeln beim Abnehmen?",
+  "Was koche ich heute Abend mit viel Eiweiß?",
   "Was zeigen die Phase-3-Studien zu Retatrutid?",
   "Welche Nebenwirkungen hatten Studienteilnehmer je Dosis?",
   "Retatrutid vs. Tirzepatid vs. Semaglutid",
@@ -1293,6 +1295,15 @@ function renderAIBody(){
     <div class="card stack" style="gap:6px">
       <p class="sub" style="margin:0;font-size:14px">Sucht zuerst passende Studien in PubMed und lässt sie dann von einer kostenlosen KI auf Deutsch erklären. Die App wechselt automatisch zwischen mehreren freien Anbietern. Antworten ersetzen keine ärztliche Beratung.</p>
       <div class="sub" id="aiProv" style="font-size:12px"></div>
+      <details id="keyBox"><summary class="sub" style="font-size:13px">Noch schlauer: eigenen kostenlosen Schlüssel eintragen</summary>
+        <div class="stack" style="gap:8px;margin-top:8px">
+          <p class="sub" style="margin:0;font-size:13px">Einmal kostenlos anmelden und Schlüssel kopieren. Er bleibt nur auf diesem Handy gespeichert. Empfehlung: Google Gemini.</p>
+          <select id="keyPreset">${Object.entries(KEY_PRESETS).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join("")}</select>
+          <a id="keyGet" class="sub" target="_blank" rel="noopener" style="color:var(--accent)">Schlüssel holen</a>
+          <input type="text" id="keyVal" placeholder="Schlüssel hier einfügen" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <div class="row"><button class="btn primary grow" id="keySave" type="button">Speichern</button><button class="btn" id="keyDel" type="button">Entfernen</button></div>
+        </div>
+      </details>
       <input type="checkbox" id="spar" hidden>
     </div>
     <div class="msgs" id="msgs"></div>
@@ -1308,6 +1319,14 @@ function renderAIBody(){
     </div>
     <div id="aiOff" class="banner warn" hidden>Die KI ist in dieser Ansicht nicht verfügbar. Nutze „Studien suchen“ oder öffne den Link in der Claude-App.</div>
   </div>`;
+  const kp=$("#keyPreset"), kv=$("#keyVal"), kg=$("#keyGet");
+  if (kp){
+    const cur = ownKey(); if (cur){ kp.value = cur.preset; kv.value = "••••••" + String(cur.key).slice(-4); }
+    const upd = ()=>{ kg.href = KEY_PRESETS[kp.value].get; kg.textContent = "Schlüssel holen bei " + KEY_PRESETS[kp.value].label.split(" (")[0] + " →"; };
+    kp.onchange = upd; upd();
+    $("#keySave").onclick = ()=>{ const v = kv.value.trim(); if (!v || v.startsWith("••")) { toast("Bitte Schlüssel einfügen"); return; } try { localStorage.setItem("retatracker.ownkey", JSON.stringify({preset:kp.value, key:v})); } catch(_){} kv.value = "••••••"+v.slice(-4); toast("Gespeichert. Ab jetzt antwortet zuerst dein Schlüssel."); provInfo(); };
+    $("#keyDel").onclick = ()=>{ try { localStorage.removeItem("retatracker.ownkey"); } catch(_){} kv.value=""; toast("Schlüssel entfernt"); provInfo(); };
+  }
   $("#spar").onchange = e => { sparmodus = e.target.checked; try{localStorage.setItem("retatracker.spar", sparmodus?"1":"0");}catch(_){} };
   $("#withData").onchange = e => { withData = e.target.checked; };
   $("#sendBtn").onclick = ()=>sendChat($("#chatIn").value);
@@ -1485,12 +1504,47 @@ function renderMsgs(streamText){
 
 
 /* ---------- Kostenlose KI ohne Konto: mehrere Anbieter mit automatischem Wechsel ---------- */
+const SMART = [/gpt-oss-120b/i,/deepseek-?(v3|r1|v4|chat)/i,/qwen3.*(235|480|max)/i,/kimi|glm-4\.[5-9]|minimax/i,/llama-?(3\.3|4).*(70|maverick)/i,/mistral-(large|medium)/i,/gpt-4\.1(?!-nano)|gpt-4o(?!-mini)|gpt-5(?!-nano)/i,/gemini/i,/qwen/i,/deepseek/i,/llama/i,/mistral/i];
+function smartScore(id){ const i = SMART.findIndex(re=>re.test(id)); return i<0 ? 99 : i; }
 const PROVIDERS = [
-  {id:"llm7", name:"LLM7", url:"https://api.llm7.io/v1/chat/completions", model:"default", headers:{"Authorization":"Bearer unused"}},
-  {id:"pollinations", name:"Pollinations", url:"https://text.pollinations.ai/openai", model:"openai", headers:{}},
-  {id:"ovh-gpt", name:"OVHcloud (GPT-OSS)", url:"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions", model:"gpt-oss-120b", headers:{}},
-  {id:"ovh-llama", name:"OVHcloud (Llama)", url:"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions", model:"Meta-Llama-3_3-70B-Instruct", headers:{}}
+  {id:"own", name:"Eigener Schlüssel", own:true},
+  {id:"ovh-gpt", name:"OVHcloud GPT-OSS 120B", url:"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions", model:"gpt-oss-120b", headers:{}},
+  {id:"llm7", name:"LLM7", url:"https://api.llm7.io/v1/chat/completions", model:"default", headers:{"Authorization":"Bearer unused"}, models:"https://api.llm7.io/v1/models"},
+  {id:"pollinations", name:"Pollinations", url:"https://text.pollinations.ai/openai", model:"openai", headers:{}, models:"https://text.pollinations.ai/models"},
+  {id:"ovh-llama", name:"OVHcloud Llama 3.3 70B", url:"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions", model:"Meta-Llama-3_3-70B-Instruct", headers:{}}
 ];
+const KEY_PRESETS = {
+  gemini:{label:"Google Gemini (kostenloser Schlüssel)", url:"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", model:"gemini-2.5-flash", get:"https://aistudio.google.com/apikey"},
+  groq:{label:"Groq (kostenloser Schlüssel)", url:"https://api.groq.com/openai/v1/chat/completions", model:"openai/gpt-oss-120b", get:"https://console.groq.com/keys"},
+  openrouter:{label:"OpenRouter (kostenloser Schlüssel)", url:"https://openrouter.ai/api/v1/chat/completions", model:"openrouter/free", get:"https://openrouter.ai/keys"}
+};
+function ownKey(){ try { return JSON.parse(localStorage.getItem("retatracker.ownkey")||"null"); } catch(_){ return null; } }
+function resolveProvider(p){
+  if (!p.own) return p;
+  const k = ownKey(); if (!k || !k.key || !KEY_PRESETS[k.preset]) return null;
+  const pr = KEY_PRESETS[k.preset];
+  return {id:"own", name:pr.label.split(" (")[0], url:pr.url, model:k.model||pr.model, headers:{"Authorization":"Bearer "+k.key}};
+}
+/* bestes freies Modell eines Anbieters automatisch wählen (12 h gemerkt) */
+async function discoverModel(p){
+  if (!p.models) return;
+  const ck = "retatracker.model."+p.id;
+  try { const c = JSON.parse(localStorage.getItem(ck)||"null"); if (c && Date.now()-c.t < 432e5){ p.model = c.m; return; } } catch(_){}
+  try {
+    const ctl = new AbortController(); const t = setTimeout(()=>ctl.abort(), 6000);
+    const r = await fetch(p.models, {signal:ctl.signal}); clearTimeout(t);
+    if (!r.ok) return;
+    const j = await r.json();
+    let list = Array.isArray(j) ? j : (j.data || []);
+    list = list.filter(m => !m.tier || /anonymous|free/i.test(m.tier))
+               .filter(m => !/audio|image|vision-only|embed|tts|whisper|guard|moderation/i.test((m.id||m.name||"")+" "+(m.type||"")))
+               .map(m => String(m.id || m.name));
+    if (!list.length) return;
+    list.sort((a,b)=>smartScore(a)-smartScore(b));
+    if (smartScore(list[0]) < 99) p.model = list[0];
+    try { localStorage.setItem(ck, JSON.stringify({t:Date.now(), m:p.model})); } catch(_){}
+  } catch(_){}
+}
 const provState = {};   // id -> {until: ms, fails: n}
 let provCursor = 0;
 try { provCursor = +(localStorage.getItem("retatracker.provcursor")||0) % PROVIDERS.length; } catch(_){}
@@ -1499,7 +1553,7 @@ function provCool(p, ms){ const st = provState[p.id] || (provState[p.id]={fails:
 function provInfo(){
   const el = $("#aiProv"); if(!el) return;
   const local = ("LanguageModel" in self) ? "Chrome-Gerät-KI, " : "";
-  el.textContent = "Anbieter: " + local + PROVIDERS.map(p=>p.name+(provAvailable(p)?"":" (Pause)")).join(", ");
+  el.textContent = "Anbieter: " + local + PROVIDERS.map(resolveProvider).filter(Boolean).map(p=>p.name+(provAvailable(p)?"":" (Pause)")).join(", ");
 }
 async function callProvider(p, messages, signal){
   const ctl = new AbortController();
@@ -1507,7 +1561,7 @@ async function callProvider(p, messages, signal){
   const onAbort = ()=>ctl.abort(); if (signal) signal.addEventListener("abort", onAbort);
   try {
     const r = await fetch(p.url, {method:"POST", signal:ctl.signal, headers:Object.assign({"Content-Type":"application/json"}, p.headers),
-      body: JSON.stringify({model:p.model, messages, temperature:0.3, max_tokens:900})});
+      body: JSON.stringify({model:p.model, messages, temperature:0.5, max_tokens:1600})});
     if (r.status===429) { provCool(p, 90000); throw new Error("429"); }
     if (!r.ok) { provCool(p, 30000); throw new Error("HTTP "+r.status); }
     const j = await r.json();
@@ -1531,20 +1585,19 @@ async function askFreeAI(messages, signal, onStatus){
   // Zwischenspeicher: gleiche Frage mit gleichem Kontext wird 24 h nicht neu gestellt
   const key = "retatracker.aicache." + hashStr(JSON.stringify(messages));
   try { const c = JSON.parse(localStorage.getItem(key)||"null"); if (c && Date.now()-c.t < 864e5) return {text:c.text, provider:c.p+" (gespeichert)"}; } catch(_){}
-  const order = [];
-  for (let i=0;i<PROVIDERS.length;i++) order.push(PROVIDERS[(provCursor+i)%PROVIDERS.length]);
-  provCursor = (provCursor+1) % PROVIDERS.length;            // nächste Frage startet beim nächsten Anbieter
-  try { localStorage.setItem("retatracker.provcursor", String(provCursor)); } catch(_){}
+  // klügster verfügbarer Anbieter zuerst; ist er voll, pausiert er und der nächste springt ein
+  const order = PROVIDERS.map(resolveProvider).filter(Boolean);
+  await Promise.all(order.map(discoverModel));
   const errors = [];
   for (const p of order){
     if (signal && signal.aborted) throw {code:"cancelled"};
     if (!provAvailable(p)) { errors.push(p.name+": Pause"); continue; }
-    onStatus(`Frage ${p.name} …`);
+    onStatus(`Frage ${p.name} (${p.model}) …`);
     try {
       const text = await callProvider(p, messages, signal);
       try { localStorage.setItem(key, JSON.stringify({t:Date.now(), text, p:p.name})); } catch(_){}
       provInfo();
-      return {text, provider:p.name};
+      return {text, provider:p.name+" · "+p.model};
     } catch(e){ if (signal && signal.aborted) throw {code:"cancelled"}; errors.push(p.name+": "+(e.message||"Fehler")); }
   }
   try { onStatus("Frage Geräte-KI …"); const text = await callLocalModel(messages); return {text, provider:"Geräte-KI (Chrome)"}; } catch(e){ errors.push("Gerät: "+e.message); }
@@ -1567,6 +1620,8 @@ function pubmedQueryFrom(text, prev){
 }
 let lastPep = null;
 async function pubmedContext(text, onStatus){
+  const health = /peptid|retatru|tirzep|semaglu|glp|ozempic|wegovy|mounjaro|studie|nebenwirk|dosis|abnehm|gewicht|muskel|bpc|tb-?500|ipamorelin|cjc|tesamorelin|ghk|mots|cagril|survodu|mazdu|orforglip|diabet|insulin|übel|gallen|pankrea|leber|blutdruck|herz/i.test(text);
+  if (!health) return {ctx:"", refs:[]};
   const {q, pep} = pubmedQueryFrom(text, lastPep);
   if (pep) lastPep = pep;
   if (!q || !mcp) return {ctx:"", refs:[]};
@@ -1584,6 +1639,16 @@ async function pubmedContext(text, onStatus){
   } catch(_){ return {ctx:"", refs:[]}; }
 }
 
+
+const GURU_PROMPT = `Du bist "Peptide Guru", ein kluger, freundlicher und ehrlicher Gesprächspartner. Du sprichst Deutsch, locker und auf Augenhöhe, wie ein gut informierter Freund.
+- Du kannst über ALLE Themen reden: Alltag, Ernährung, Training, Technik, Reisen, Geld, Gesundheit, Wissen, Witze. Bleib nicht künstlich beim Thema Peptide.
+- Dein Spezialgebiet sind Peptide und GLP-1/GIP/Glukagon-Wirkstoffe (Retatrutid, Tirzepatid, Semaglutid usw.), Abnehmen, Muskelerhalt und Studienlage. Dort antwortest du besonders genau, nennst Studien und sagst, wie gut die Belege sind.
+- Denk mit: Stell eine Rückfrage, wenn etwas unklar ist, gib konkrete Beispiele und erkläre das Warum.
+- Länge passend zur Frage: kurze Frage, kurze Antwort; komplexe Frage, gegliederte Antwort mit Stichpunkten.
+- Ehrlich bleiben: Wenn du etwas nicht sicher weißt, sag es. Erfinde keine Studien, Zahlen oder Quellen.
+- Gesundheit: Studiendosierungen darfst du als Studienfakt nennen, aber keine persönliche Dosis-Empfehlung. Bei Warnzeichen (starke Bauchschmerzen, anhaltendes Erbrechen, Herzrasen) rätst du zum Arzt. Keine Bezugsquellen für nicht zugelassene Mittel.
+- ${KNOWLEDGE}`;
+
 async function freeChat(text){
   const inp=$("#chatIn"); if(inp) inp.value="";
   chat.push({role:"user", content:text});
@@ -1593,15 +1658,14 @@ async function freeChat(text){
   const setStatus = t => { const live=$("#live"); if(live) live.textContent = t; };
   try {
     const {ctx, refs} = await pubmedContext(text, setStatus);
-    const sys = RULES.replace(/- Wenn dir das Werkzeug pubmed_suche[^\n]*\n/,"") +
-      "\n\nWICHTIG: Antworte auf Deutsch, knapp (höchstens etwa 250 Wörter), mit Stichpunkten. Stütze dich vorrangig auf die unten gelieferten PubMed-Studien und verweise mit [1], [2] usw. darauf. Steht etwas nicht in den Studien, sag das und kennzeichne es als allgemeines Wissen. Erfinde keine Zahlen." +
-      (ctx ? "\n\n"+ctx : "\n\n(Zu dieser Frage wurden keine PubMed-Studien gefunden.)") +
+    const sys = GURU_PROMPT +
+      (ctx ? "\n\nZu dieser Frage passende Studien aus PubMed. Nutze sie, wenn sie helfen, und verweise mit [1], [2] usw. darauf:\n\n"+ctx : "") +
       (withData && entries.length ? "\n\n"+trackerContext() : "");
-    const history = chat.slice(-6).map(m=>({role:m.role, content:m.content.replace(/\n\n---\n[\s\S]*$/,"")}));
+    const history = chat.slice(-12).map(m=>({role:m.role, content:m.content.replace(/\n\n---\n[\s\S]*$/,"")}));
     while (history.length && history[0].role!=="user") history.shift();
     const {text:ans, provider} = await askFreeAI([{role:"system", content:sys}, ...history], chatCtl.signal, setStatus);
     const src = refs.length ? "\n\n---\n**Quellen (PubMed):**\n" + refs.map(r=>`- [${r.n}] ${r.au||""} ${r.year||""}: ${r.title} ${r.doi?`https://doi.org/${r.doi}`:`https://pubmed.ncbi.nlm.nih.gov/${r.pmid}/`}`).join("\n") : "";
-    chat.push({role:"assistant", content: ans + src + `\n\n*Antwort von ${provider}. Kostenlose KI kann Fehler machen, prüfe wichtige Angaben in den Quellen.*`});
+    chat.push({role:"assistant", content: ans + src + `\n\n*Antwort von ${provider}. Kostenlose KI kann Fehler machen${refs.length?", prüfe Wichtiges in den Quellen":""}.*`});
   } catch(e){
     chat.push({role:"assistant", content: e && e.code==="cancelled" ? "*(gestoppt)*" : "*Gerade sind alle kostenlosen KI-Anbieter ausgelastet. Warte eine Minute und frag nochmal, oder nutze „Studien suchen“.*"});
   } finally {

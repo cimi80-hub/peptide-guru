@@ -218,7 +218,7 @@ let downloads = null;
 let editing = null;        // entry being edited in the form
 let histFilter = "all";
 let isOwner = false, mcp = null, sample = null, chatDoc = null, chat = [], chatBusy = false, chatCtl = null, chatLoaded = false;
-let withData = true;
+let withData = false;
 let aiMode = "search", sparmodus = true;
 let pmState = {q:"", results:[], total:0, busy:false, err:"", sort:"relevance", filter:"all"};
 let autoTr = true;
@@ -1209,6 +1209,7 @@ function md(text){
   for (const raw of lines){
     const l = raw.trim();
     if (!l){ flushP(); closeL(); continue; }
+    if (/^-{3,}$/.test(l)){ flushP(); closeL(); out+='<hr style="border:0;border-top:1px solid var(--line);margin:10px 0">'; continue; }
     let m;
     if ((m = l.match(/^#{1,4}\s+(.*)$/))){ flushP(); closeL(); out+="<h4>"+inline(m[1])+"</h4>"; continue; }
     if ((m = l.match(/^(?:[-•*]|\d+[.)])\s+(.*)$/))){ flushP(); if(!inList){ out+="<ul>"; inList=true; } out+="<li>"+inline(m[1])+"</li>"; continue; }
@@ -1275,11 +1276,10 @@ function mcpMsg(e){
 }
 
 function viewAI(v){
-  if (!sample) aiMode = "search";
   v.innerHTML = `<div class="stack">
-    <div class="seg" role="group" aria-label="Modus" ${sample?"":"hidden"}>
+    <div class="seg" role="group" aria-label="Modus">
       <button type="button" data-mode="search" aria-pressed="${aiMode==="search"}">Studien suchen<br><span class="sub" style="font-size:11px">ohne KI, kostenlos</span></button>
-      <button type="button" data-mode="chat" aria-pressed="${aiMode==="chat"}">KI fragen<br><span class="sub" style="font-size:11px">nutzt Claude</span></button>
+      <button type="button" data-mode="chat" aria-pressed="${aiMode==="chat"}">KI fragen<br><span class="sub" style="font-size:11px">kostenlos, ohne Konto</span></button>
     </div>
     <div id="aiBody"></div>
   </div>`;
@@ -1291,13 +1291,14 @@ function renderAIBody(){
   if (aiMode==="search") return viewSearch(body);
   body.innerHTML = `<div class="stack">
     <div class="card stack" style="gap:6px">
-      <p class="sub" style="margin:0;font-size:14px">Die KI sucht in PubMed und erklärt auf Deutsch mit Quellen. Antworten ersetzen keine ärztliche Beratung.</p>
-      <label class="chk" for="spar"><input type="checkbox" id="spar" ${sparmodus?"checked":""}> Sparmodus: kleineres, schnelles Modell, kurze Antworten</label>
+      <p class="sub" style="margin:0;font-size:14px">Sucht zuerst passende Studien in PubMed und lässt sie dann von einer kostenlosen KI auf Deutsch erklären. Die App wechselt automatisch zwischen mehreren freien Anbietern. Antworten ersetzen keine ärztliche Beratung.</p>
+      <div class="sub" id="aiProv" style="font-size:12px"></div>
+      <input type="checkbox" id="spar" hidden>
     </div>
     <div class="msgs" id="msgs"></div>
     <div class="chips" id="quick"></div>
     <div class="composer">
-      <label class="chk" for="withData"><input type="checkbox" id="withData" ${withData?"checked":""}> Meine Tracker-Daten mitschicken</label>
+      <label class="chk" for="withData"><input type="checkbox" id="withData" ${withData?"checked":""}> Meine Tracker-Daten mitschicken <span class="sub" style="font-size:11px">(gehen dann an den KI-Anbieter)</span></label>
       <div class="row" style="align-items:flex-end">
         <textarea id="chatIn" class="grow" placeholder="Frag zu Studien, Wirkung, Nebenwirkungen …" aria-label="Frage"></textarea>
         <button class="btn primary" id="sendBtn">Senden</button>
@@ -1479,13 +1480,139 @@ function renderMsgs(streamText){
   box.innerHTML = html;
   const sb=$("#sendBtn"), st=$("#stopBtn");
   if (sb){ sb.hidden = chatBusy; st.hidden = !chatBusy; }
-  const off=$("#aiOff"); if(off) off.hidden = !!sample || mode==="connecting";
+  const off=$("#aiOff"); if(off) off.hidden = true; provInfo();
+}
+
+
+/* ---------- Kostenlose KI ohne Konto: mehrere Anbieter mit automatischem Wechsel ---------- */
+const PROVIDERS = [
+  {id:"llm7", name:"LLM7", url:"https://api.llm7.io/v1/chat/completions", model:"default", headers:{"Authorization":"Bearer unused"}},
+  {id:"pollinations", name:"Pollinations", url:"https://text.pollinations.ai/openai", model:"openai", headers:{}},
+  {id:"ovh-gpt", name:"OVHcloud (GPT-OSS)", url:"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions", model:"gpt-oss-120b", headers:{}},
+  {id:"ovh-llama", name:"OVHcloud (Llama)", url:"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions", model:"Meta-Llama-3_3-70B-Instruct", headers:{}}
+];
+const provState = {};   // id -> {until: ms, fails: n}
+let provCursor = 0;
+try { provCursor = +(localStorage.getItem("retatracker.provcursor")||0) % PROVIDERS.length; } catch(_){}
+function provAvailable(p){ const st = provState[p.id]; return !st || Date.now() > st.until; }
+function provCool(p, ms){ const st = provState[p.id] || (provState[p.id]={fails:0}); st.fails++; st.until = Date.now() + ms; }
+function provInfo(){
+  const el = $("#aiProv"); if(!el) return;
+  const local = ("LanguageModel" in self) ? "Chrome-Gerät-KI, " : "";
+  el.textContent = "Anbieter: " + local + PROVIDERS.map(p=>p.name+(provAvailable(p)?"":" (Pause)")).join(", ");
+}
+async function callProvider(p, messages, signal){
+  const ctl = new AbortController();
+  const t = setTimeout(()=>ctl.abort(), 45000);
+  const onAbort = ()=>ctl.abort(); if (signal) signal.addEventListener("abort", onAbort);
+  try {
+    const r = await fetch(p.url, {method:"POST", signal:ctl.signal, headers:Object.assign({"Content-Type":"application/json"}, p.headers),
+      body: JSON.stringify({model:p.model, messages, temperature:0.3, max_tokens:900})});
+    if (r.status===429) { provCool(p, 90000); throw new Error("429"); }
+    if (!r.ok) { provCool(p, 30000); throw new Error("HTTP "+r.status); }
+    const j = await r.json();
+    let txt = j?.choices?.[0]?.message?.content || "";
+    txt = String(txt).replace(/<think>[\s\S]*?<\/think>/g,"").trim();
+    if (!txt) { provCool(p, 15000); throw new Error("leer"); }
+    return txt;
+  } finally { clearTimeout(t); if (signal) signal.removeEventListener("abort", onAbort); }
+}
+async function callLocalModel(messages){
+  if (!("LanguageModel" in self)) throw new Error("kein Gerätemodell");
+  const av = await LanguageModel.availability(); if (av!=="available") throw new Error("nicht bereit");
+  const sys = messages.filter(m=>m.role==="system").map(m=>m.content).join("\n\n");
+  const sess = await LanguageModel.create({initialPrompts:[{role:"system", content:sys}]});
+  const rest = messages.filter(m=>m.role!=="system");
+  const last = rest.pop();
+  const ctx = rest.map(m=>(m.role==="user"?"Frage: ":"Antwort: ")+m.content).join("\n\n");
+  return await sess.prompt((ctx?ctx+"\n\n":"") + last.content);
+}
+async function askFreeAI(messages, signal, onStatus){
+  // Zwischenspeicher: gleiche Frage mit gleichem Kontext wird 24 h nicht neu gestellt
+  const key = "retatracker.aicache." + hashStr(JSON.stringify(messages));
+  try { const c = JSON.parse(localStorage.getItem(key)||"null"); if (c && Date.now()-c.t < 864e5) return {text:c.text, provider:c.p+" (gespeichert)"}; } catch(_){}
+  const order = [];
+  for (let i=0;i<PROVIDERS.length;i++) order.push(PROVIDERS[(provCursor+i)%PROVIDERS.length]);
+  provCursor = (provCursor+1) % PROVIDERS.length;            // nächste Frage startet beim nächsten Anbieter
+  try { localStorage.setItem("retatracker.provcursor", String(provCursor)); } catch(_){}
+  const errors = [];
+  for (const p of order){
+    if (signal && signal.aborted) throw {code:"cancelled"};
+    if (!provAvailable(p)) { errors.push(p.name+": Pause"); continue; }
+    onStatus(`Frage ${p.name} …`);
+    try {
+      const text = await callProvider(p, messages, signal);
+      try { localStorage.setItem(key, JSON.stringify({t:Date.now(), text, p:p.name})); } catch(_){}
+      provInfo();
+      return {text, provider:p.name};
+    } catch(e){ if (signal && signal.aborted) throw {code:"cancelled"}; errors.push(p.name+": "+(e.message||"Fehler")); }
+  }
+  try { onStatus("Frage Geräte-KI …"); const text = await callLocalModel(messages); return {text, provider:"Geräte-KI (Chrome)"}; } catch(e){ errors.push("Gerät: "+e.message); }
+  provInfo();
+  throw {code:"all_failed", message: errors.join(" · ")};
+}
+function hashStr(s){ let h=5381; for (let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0; return (h>>>0).toString(36); }
+
+/* Suchbegriffe für PubMed aus deutscher Frage ableiten (ohne KI, kostet nichts) */
+const PEP_TERMS = {"retatrutid":"retatrutide","reta":"retatrutide","tirzepatid":"tirzepatide","mounjaro":"tirzepatide","zepbound":"tirzepatide","semaglutid":"semaglutide","ozempic":"semaglutide","wegovy":"semaglutide","rybelsus":"semaglutide","liraglutid":"liraglutide","cagrilintid":"cagrilintide","cagrisema":"cagrisema","survodutid":"survodutide","mazdutid":"mazdutide","orforglipron":"orforglipron","bpc":"BPC-157","tb-500":"thymosin beta-4","tb500":"thymosin beta-4","ipamorelin":"ipamorelin","cjc":"CJC-1295","tesamorelin":"tesamorelin","mots":"MOTS-c","ghk":"GHK-Cu","aod":"AOD-9604","glp-1":"GLP-1 receptor agonist","glp1":"GLP-1 receptor agonist","amycretin":"amycretin","maritide":"maridebart cafraglutide"};
+const TOPIC_TERMS = [[/nebenwirk|vertr[aä]g/,"adverse events"],[/übel|uebel|erbrech/,"nausea"],[/muskel|magermasse/,"lean mass"],[/gewicht|abnehm|abnahm/,"weight loss"],[/dosis|dosier|titrat/,"dose"],[/phase ?3|studie|trial/,"trial"],[/gallen/,"gallbladder"],[/pankrea|bauchspeichel/,"pancreatitis"],[/herz|kardio|blutdruck/,"cardiovascular"],[/leber|fettleber/,"liver"],[/diabet|zucker|hba1c/,"diabetes"],[/schlaf|apnoe/,"sleep apnea"],[/haare|haarausfall/,"hair loss"],[/haut|kribbel|dysästh/,"dysesthesia"],[/absetz|jojo|wieder zun/,"discontinuation weight regain"],[/frau|weiblich/,"women"],[/schwanger/,"pregnancy"],[/niere/,"kidney"],[/alkohol/,"alcohol"],[/heilung|sehne|verletz/,"healing"],[/schilddr/,"thyroid"],[/psych|depress|stimm/,"psychiatric"]];
+function pubmedQueryFrom(text, prev){
+  const t = text.toLowerCase();
+  let pep = null;
+  for (const k of Object.keys(PEP_TERMS)) if (t.includes(k)) { pep = PEP_TERMS[k]; break; }
+  if (!pep && prev) pep = prev;
+  const topics = []; for (const [re,en] of TOPIC_TERMS) if (re.test(t) && topics.length<2) topics.push(en);
+  if (!pep && !topics.length) return {q:null, pep:null};
+  return {q:[pep||"GLP-1 receptor agonist", ...topics].join(" "), pep};
+}
+let lastPep = null;
+async function pubmedContext(text, onStatus){
+  const {q, pep} = pubmedQueryFrom(text, lastPep);
+  if (pep) lastPep = pep;
+  if (!q || !mcp) return {ctx:"", refs:[]};
+  onStatus(`Suche in PubMed: „${q}“ …`);
+  try {
+    let res = await mcp.callTool("PubMed","search_articles",{query:q, max_results:5, sort:"relevance"});
+    let ids = res.payload?.pmids || [];
+    if (!ids.length && q.includes(" ")){ res = await mcp.callTool("PubMed","search_articles",{query:q.split(" ")[0], max_results:5}); ids = res.payload?.pmids||[]; }
+    if (!ids.length) return {ctx:"", refs:[]};
+    const meta = await mcp.callTool("PubMed","get_article_metadata",{pmids:ids});
+    const arts = meta.payload?.articles || [];
+    const refs = arts.map((a,i)=>({n:i+1, title:a.title, year:a.publication_date?.year, au:a.authors?.[0]?.last_name, doi:a.identifiers?.doi, pmid:a.identifiers?.pmid, type:(a.article_types||[]).filter(x=>x!=="Journal Article").join(", "), abs:String(a.abstract||"").slice(0,900)}));
+    const ctx = "STUDIEN AUS PUBMED (Suche: "+q+"):\n" + refs.map(r=>`[${r.n}] ${r.au||""} ${r.year||""}. ${r.title} ${r.type?"("+r.type+")":""}\n${r.abs||"(kein Abstract)"}`).join("\n\n");
+    return {ctx, refs};
+  } catch(_){ return {ctx:"", refs:[]}; }
+}
+
+async function freeChat(text){
+  const inp=$("#chatIn"); if(inp) inp.value="";
+  chat.push({role:"user", content:text});
+  chatBusy = true; renderMsgs();
+  window.scrollTo(0, document.body.scrollHeight);
+  chatCtl = new AbortController();
+  const setStatus = t => { const live=$("#live"); if(live) live.textContent = t; };
+  try {
+    const {ctx, refs} = await pubmedContext(text, setStatus);
+    const sys = RULES.replace(/- Wenn dir das Werkzeug pubmed_suche[^\n]*\n/,"") +
+      "\n\nWICHTIG: Antworte auf Deutsch, knapp (höchstens etwa 250 Wörter), mit Stichpunkten. Stütze dich vorrangig auf die unten gelieferten PubMed-Studien und verweise mit [1], [2] usw. darauf. Steht etwas nicht in den Studien, sag das und kennzeichne es als allgemeines Wissen. Erfinde keine Zahlen." +
+      (ctx ? "\n\n"+ctx : "\n\n(Zu dieser Frage wurden keine PubMed-Studien gefunden.)") +
+      (withData && entries.length ? "\n\n"+trackerContext() : "");
+    const history = chat.slice(-6).map(m=>({role:m.role, content:m.content.replace(/\n\n---\n[\s\S]*$/,"")}));
+    while (history.length && history[0].role!=="user") history.shift();
+    const {text:ans, provider} = await askFreeAI([{role:"system", content:sys}, ...history], chatCtl.signal, setStatus);
+    const src = refs.length ? "\n\n---\n**Quellen (PubMed):**\n" + refs.map(r=>`- [${r.n}] ${r.au||""} ${r.year||""}: ${r.title} ${r.doi?`https://doi.org/${r.doi}`:`https://pubmed.ncbi.nlm.nih.gov/${r.pmid}/`}`).join("\n") : "";
+    chat.push({role:"assistant", content: ans + src + `\n\n*Antwort von ${provider}. Kostenlose KI kann Fehler machen, prüfe wichtige Angaben in den Quellen.*`});
+  } catch(e){
+    chat.push({role:"assistant", content: e && e.code==="cancelled" ? "*(gestoppt)*" : "*Gerade sind alle kostenlosen KI-Anbieter ausgelastet. Warte eine Minute und frag nochmal, oder nutze „Studien suchen“.*"});
+  } finally {
+    chatBusy = false; chatCtl = null; saveChat(); renderMsgs();
+  }
 }
 
 async function sendChat(text){
   text = (text||"").trim();
   if (!text || chatBusy) return;
-  if (!sample){ const off=$("#aiOff"); if(off) off.hidden=false; return; }
+  if (!sample) return freeChat(text);
   const inp=$("#chatIn"); if(inp) inp.value="";
   chat.push({role:"user", content:text});
   chatBusy = true; renderMsgs();

@@ -1205,7 +1205,7 @@ function trackerContext(){
 function md(text){
   const lines = esc(text).split("\n");
   let out="", inList=false, para=[];
-  const inline = t => t.replace(/\[([^\]]+)\]\((https:\/\/[^\s)]+)\)/g,(m,l,u)=>`<a href="${u}" target="_blank" rel="noopener">${l}</a>`).replace(/(^|[\s(])(https:\/\/doi\.org\/[^\s)<]+)/g,(m,pre,u)=>`${pre}<a href="${u}" target="_blank" rel="noopener">${u.replace("https://","")}</a>`).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*(?!\s)(.+?)\*(?!\*)/g,"$1<i>$2</i>");
+  const inline = t => t.replace(/\[([^\]]+)\]\((https:\/\/[^\s)]+)\)/g,(m,l,u)=>`<a href="${u}" target="_blank" rel="noopener">${l}</a>`).replace(/(^|[\s(])(https:\/\/[^\s)<]+)/g,(m,pre,u)=>`${pre}<a href="${u}" target="_blank" rel="noopener">${u.replace("https://","").split("/")[0]}</a>`).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*(?!\s)(.+?)\*(?!\*)/g,"$1<i>$2</i>");
   const flushP = ()=>{ if(para.length){ out+="<p>"+inline(para.join("<br>"))+"</p>"; para=[]; } };
   const closeL = ()=>{ if(inList){ out+="</ul>"; inList=false; } };
   for (const raw of lines){
@@ -1649,6 +1649,63 @@ const GURU_PROMPT = `Du bist "Peptide Guru", ein kluger, freundlicher und ehrlic
 - Gesundheit: Studiendosierungen darfst du als Studienfakt nennen, aber keine persönliche Dosis-Empfehlung. Bei Warnzeichen (starke Bauchschmerzen, anhaltendes Erbrechen, Herzrasen) rätst du zum Arzt. Keine Bezugsquellen für nicht zugelassene Mittel.
 - ${KNOWLEDGE}`;
 
+
+/* ---------- Aktuelles Wissen: Nachrichten (GDELT) + Wikipedia, kostenlos ohne Schlüssel ---------- */
+const STOP = new Set("der die das ein eine einer eines und oder aber ist sind war wird werden wurde was wer wie wo wann warum wieso welche welcher welches gibt es mir mich dir dich du ich wir ihr sie er man mal noch schon jetzt heute gerade bitte kannst kann können sag sage erzähl erzähle über ueber zum zur von vom mit für fuer auf aus bei nach den dem des im in an am als auch nicht kein keine sich sein seine haben hat habe gibt's neu neue neues neuesten aktuell aktuelle aktuellen news nachrichten stand infos info".split(" "));
+function keywords(text){
+  return text.replace(/[^\p{L}\p{N}\- ]/gu," ").split(/\s+/).filter(w=>w.length>2 && !STOP.has(w.toLowerCase())).slice(0,6).join(" ");
+}
+function wantsWeb(text){
+  return /aktuell|heute|gestern|morgen|neu(e|es|este|igkeit)?\b|news|nachricht|gerade|jetzt|stand|derzeit|momentan|202[5-9]|zugelassen|zulassung|preis|kostet|wer ist|was ist|wann|wetter|ergebnis|spiel|wahl|gesetz|update|version|release|neuste|letzte/i.test(text);
+}
+async function timedJson(url, ms=7000){
+  const ctl = new AbortController(); const t = setTimeout(()=>ctl.abort(), ms);
+  try { const r = await fetch(url, {signal:ctl.signal}); if (!r.ok) throw 0; return await r.json(); } finally { clearTimeout(t); }
+}
+async function webContext(text, onStatus){
+  if (!wantsWeb(text)) return {ctx:"", links:[]};
+  const kw = keywords(text); if (!kw) return {ctx:"", links:[]};
+  onStatus(`Suche aktuelle Infos: „${kw}“ …`);
+  const links = []; const parts = [];
+  const news = timedJson(`https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(kw)}&mode=artlist&format=json&maxrecords=8&sort=datedesc&timespan=3months`).catch(()=>null);
+  const wiki = async (lang)=>{
+    const s = await timedJson(`https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(kw)}&srlimit=2&format=json&origin=*`);
+    const titles = (s?.query?.search||[]).map(x=>x.title); if (!titles.length) return [];
+    const e = await timedJson(`https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts|info&inprop=url&exintro=1&explaintext=1&exchars=1200&titles=${encodeURIComponent(titles.join("|"))}&format=json&origin=*`);
+    return Object.values(e?.query?.pages||{}).map(pg=>({title:pg.title, url:pg.fullurl, text:pg.extract, lang}));
+  };
+  const [n, wde, wen] = await Promise.all([news, wiki("de").catch(()=>[]), wiki("en").catch(()=>[])]);
+  const arts = (n?.articles||[]).slice(0,6);
+  if (arts.length){
+    parts.push("AKTUELLE NACHRICHTEN (Überschriften, neueste zuerst):\n" + arts.map((a,i)=>{ const d=String(a.seendate||"").slice(0,8); const ds=d?`${d.slice(6,8)}.${d.slice(4,6)}.${d.slice(0,4)}`:""; links.push({t:a.title, u:a.url, d:ds, s:a.domain}); return `- ${ds} ${a.domain}: ${a.title}`; }).join("\n"));
+  }
+  const w = [...wde, ...wen].filter(x=>x.text).slice(0,3);
+  if (w.length){
+    parts.push("WIKIPEDIA:\n" + w.map(x=>{ links.push({t:"Wikipedia: "+x.title, u:x.url}); return `- ${x.title}: ${x.text}`; }).join("\n"));
+  }
+  return {ctx: parts.join("\n\n"), links};
+}
+
+/* Gemini mit Google-Suche (nur mit eigenem kostenlosen Gemini-Schlüssel): wirklich tagesaktuell */
+async function geminiGrounded(sys, history, signal){
+  const k = ownKey(); if (!k || k.preset!=="gemini" || !k.key) return null;
+  const ctl = new AbortController(); const t = setTimeout(()=>ctl.abort(), 60000);
+  const onAbort = ()=>ctl.abort(); if (signal) signal.addEventListener("abort", onAbort);
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(k.model||"gemini-2.5-flash")}:generateContent?key=${encodeURIComponent(k.key)}`, {
+      method:"POST", signal:ctl.signal, headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ systemInstruction:{parts:[{text:sys}]}, contents: history.map(m=>({role: m.role==="assistant"?"model":"user", parts:[{text:m.content}]})), tools:[{google_search:{}}], generationConfig:{temperature:0.5, maxOutputTokens:2048} })
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const cand = j?.candidates?.[0];
+    const text = (cand?.content?.parts||[]).map(p=>p.text||"").join("").trim();
+    if (!text) return null;
+    const links = (cand?.groundingMetadata?.groundingChunks||[]).map(c=>c.web).filter(Boolean).slice(0,6).map(w=>({t:w.title, u:w.uri}));
+    return {text, provider:"Gemini mit Google-Suche", links};
+  } catch(_){ return null; } finally { clearTimeout(t); if (signal) signal.removeEventListener("abort", onAbort); }
+}
+
 async function freeChat(text){
   const inp=$("#chatIn"); if(inp) inp.value="";
   chat.push({role:"user", content:text});
@@ -1657,15 +1714,23 @@ async function freeChat(text){
   chatCtl = new AbortController();
   const setStatus = t => { const live=$("#live"); if(live) live.textContent = t; };
   try {
-    const {ctx, refs} = await pubmedContext(text, setStatus);
-    const sys = GURU_PROMPT +
+    const today = new Date().toLocaleDateString("de-DE",{weekday:"long", day:"numeric", month:"long", year:"numeric"});
+    const [{ctx, refs}, web] = await Promise.all([pubmedContext(text, setStatus), webContext(text, setStatus)]);
+    const sys = `Heute ist ${today}. Dein eigenes Trainingswissen ist älter als heute. Sag nie Sätze wie "meine Daten reichen nur bis …". Nutze stattdessen die AKTUELLEN INFOS unten. Fehlen aktuelle Infos zu etwas Zeitabhängigem, sag kurz, dass du dazu keinen aktuellen Stand hast, und was du sicher weißt.\n\n` + GURU_PROMPT +
+      (web.ctx ? "\n\nAKTUELLE INFOS AUS DEM NETZ (von der App gerade abgerufen):\n\n"+web.ctx : "") +
       (ctx ? "\n\nZu dieser Frage passende Studien aus PubMed. Nutze sie, wenn sie helfen, und verweise mit [1], [2] usw. darauf:\n\n"+ctx : "") +
       (withData && entries.length ? "\n\n"+trackerContext() : "");
     const history = chat.slice(-12).map(m=>({role:m.role, content:m.content.replace(/\n\n---\n[\s\S]*$/,"")}));
     while (history.length && history[0].role!=="user") history.shift();
-    const {text:ans, provider} = await askFreeAI([{role:"system", content:sys}, ...history], chatCtl.signal, setStatus);
+    let ans, provider, glinks = [];
+    setStatus("Denkt nach …");
+    const g = await geminiGrounded(sys, history, chatCtl.signal);
+    if (g){ ({text:ans, provider} = g); glinks = g.links; }
+    else ({text:ans, provider} = await askFreeAI([{role:"system", content:sys}, ...history], chatCtl.signal, setStatus));
+    const wl = [...glinks, ...web.links].filter((l,i,arr)=>arr.findIndex(x=>x.u===l.u)===i).slice(0,8);
+    const wsrc = wl.length ? "\n\n---\n**Aktuelle Quellen:**\n" + wl.map(l=>`- ${l.d?l.d+" ":""}${l.t} ${l.u}`).join("\n") : "";
     const src = refs.length ? "\n\n---\n**Quellen (PubMed):**\n" + refs.map(r=>`- [${r.n}] ${r.au||""} ${r.year||""}: ${r.title} ${r.doi?`https://doi.org/${r.doi}`:`https://pubmed.ncbi.nlm.nih.gov/${r.pmid}/`}`).join("\n") : "";
-    chat.push({role:"assistant", content: ans + src + `\n\n*Antwort von ${provider}. Kostenlose KI kann Fehler machen${refs.length?", prüfe Wichtiges in den Quellen":""}.*`});
+    chat.push({role:"assistant", content: ans + src + wsrc + `\n\n*Antwort von ${provider}. Kostenlose KI kann Fehler machen${refs.length?", prüfe Wichtiges in den Quellen":""}.*`});
   } catch(e){
     chat.push({role:"assistant", content: e && e.code==="cancelled" ? "*(gestoppt)*" : "*Gerade sind alle kostenlosen KI-Anbieter ausgelastet. Warte eine Minute und frag nochmal, oder nutze „Studien suchen“.*"});
   } finally {

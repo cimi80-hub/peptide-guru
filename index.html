@@ -704,7 +704,7 @@ function viewHome(v){
       <span class="k">Nächste Injektion</span>
       <span class="v">${s.next ? esc(s.next.toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"})) : "–"}</span>
       <span class="d">${s.lastInj ? `Zuletzt ${esc(fmtDate(s.lastInj.date))}: ${fmt(s.lastInj.doseMg,2)} mg ${esc(s.lastInj.peptide)} · alle ${settings.intervalDays} Tage` : "Lege eine Injektion an, um den Rhythmus zu starten"}</span>
-      ${s.next?`<span style="margin-top:6px"><span class="pill ${nextCls}">${esc(nextTxt)}</span></span>`:""}
+      ${s.next?`<span style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="pill ${nextCls}">${esc(nextTxt)}</span><a href="#tools" class="pill" style="text-decoration:none" onclick="setTimeout(()=>{const c=document.getElementById('remCard'); if(c) c.scrollIntoView({behavior:'smooth'});},300)">🔔 Erinnerung einrichten</a></span>`:""}
     </div>
     <div class="grid2">
       <div class="tile"><span class="k">Gewicht</span><span class="v">${s.last?fmt(s.last.weight)+" kg":"–"}</span><span class="d">${s.last?esc(fmtDate(s.last.date)):"noch nicht erfasst"}</span></div>
@@ -1041,6 +1041,86 @@ function bindEnergy(){
   calc();
 }
 
+
+/* ---------- Injektions-Erinnerung als wiederkehrender Kalendertermin (.ics) ---------- */
+function nextInjectionDate(){
+  const inj = injections(); const last = inj[inj.length-1];
+  const iv = settings.intervalDays||7;
+  let d = last ? new Date(new Date(last.date).getTime() + iv*DAY) : new Date();
+  const today = new Date(); today.setHours(0,0,0,0);
+  while (d < today) d = new Date(d.getTime() + iv*DAY);
+  return d;
+}
+function reminderCard(){
+  const nd = nextInjectionDate();
+  const iso = d => { const x = new Date(d); x.setMinutes(x.getMinutes()-x.getTimezoneOffset()); return x.toISOString().slice(0,10); };
+  return `<div class="card stack" id="remCard">
+    <h2>🔔 Injektions-Erinnerung</h2>
+    <p class="sub" style="margin:0;font-size:14px">Legt einen wiederkehrenden Termin in deinem iPhone-Kalender an, mit Hinweis zur gewählten Uhrzeit. So wirst du erinnert, auch wenn die App geschlossen ist.</p>
+    <div class="row">
+      <label class="f grow" for="r-int">Alle … Tage<input type="number" inputmode="numeric" min="1" max="60" id="r-int" value="${settings.intervalDays||7}"></label>
+      <label class="f grow" for="r-time">Uhrzeit<input type="time" id="r-time" value="${esc(settings.remTime||"08:00")}"></label>
+    </div>
+    <label class="f" for="r-start">Erste Erinnerung am<input type="date" id="r-start" value="${iso(nd)}"></label>
+    <label class="chk" for="r-eve"><input type="checkbox" id="r-eve" ${settings.remEve!==false?"checked":""}> Zusätzlich am Vorabend um 20 Uhr erinnern</label>
+    <button class="btn primary" id="r-add" type="button">In iPhone-Kalender übernehmen</button>
+    <p class="sub" style="margin:0;font-size:12px">Danach fragt das iPhone „Zum Kalender hinzufügen“: auf <b>Hinzufügen</b> tippen. Änderst du später den Rhythmus, lösch den alten Termin im Kalender („Alle zukünftigen Ereignisse“) und leg ihn hier neu an.</p>
+  </div>`;
+}
+function buildIcs(start, intervalDays, time, eve){
+  const [hh, mm] = time.split(":").map(Number);
+  const d = new Date(start+"T00:00:00"); d.setHours(hh, mm, 0, 0);
+  const pad = n => String(n).padStart(2,"0");
+  const local = x => `${x.getFullYear()}${pad(x.getMonth()+1)}${pad(x.getDate())}T${pad(x.getHours())}${pad(x.getMinutes())}00`;
+  const end = new Date(d.getTime()+15*60000);
+  const now = new Date(); const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth()+1)}${pad(now.getUTCDate())}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}00Z`;
+  const pep = (injections().pop()||{}).peptide || "Peptid";
+  const eveMin = (hh*60+mm) + (24*60 - 20*60);   // Minuten vor dem Termin bis Vorabend 20:00
+  const lines = [
+    "BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Peptide Guru//Tracker//DE","CALSCALE:GREGORIAN","METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:peptideguru-${Date.now()}@cimi80-hub.github.io`,
+    `DTSTAMP:${stamp}`,
+    `DTSTART:${local(d)}`,
+    `DTEND:${local(end)}`,
+    `RRULE:FREQ=DAILY;INTERVAL=${intervalDays}`,
+    `SUMMARY:💉 Injektion ${pep}`,
+    "DESCRIPTION:Injektion fällig. Danach in der Peptide-Guru-App eintragen: https://cimi80-hub.github.io/peptide-guru/#log",
+    "URL:https://cimi80-hub.github.io/peptide-guru/#log",
+    "BEGIN:VALARM","ACTION:DISPLAY","DESCRIPTION:Injektion fällig","TRIGGER:PT0M","END:VALARM"
+  ];
+  if (eve) lines.push("BEGIN:VALARM","ACTION:DISPLAY","DESCRIPTION:Morgen ist Injektionstag",`TRIGGER:-PT${eveMin}M`,"END:VALARM");
+  lines.push("END:VEVENT","END:VCALENDAR");
+  return lines.join("\r\n");
+}
+function bindReminder(){
+  const b = $("#r-add"); if (!b) return;
+  b.onclick = async ()=>{
+    const iv = Math.max(1, Math.min(60, parseInt($("#r-int").value)||7));
+    const time = $("#r-time").value || "08:00";
+    const start = $("#r-start").value;
+    const eve = $("#r-eve").checked;
+    if (!start){ toast("Bitte Datum wählen"); return; }
+    settings.intervalDays = iv; settings.remTime = time; settings.remEve = eve; saveSettings();
+    const ics = buildIcs(start, iv, time, eve);
+    const blob = new Blob([ics], {type:"text/calendar;charset=utf-8"});
+    const file = new File([blob], "injektion-erinnerung.ics", {type:"text/calendar"});
+    // 1) iPhone: Datei direkt öffnen -> Kalender-Dialog
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.target = "_self";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 60000);
+      toast("Kalender-Dialog geöffnet");
+      return;
+    } catch(_){}
+    // 2) Teilen-Menü
+    try { if (navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file], title:"Injektions-Erinnerung"}); return; } } catch(_){}
+    // 3) Download
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "injektion-erinnerung.ics"; a.click();
+  };
+}
+
 function viewTools(v){
   const vials = settings.vials||[];
   v.innerHTML = `<div class="stack">
@@ -1052,6 +1132,8 @@ function viewTools(v){
         <label class="f grow" for="s-h">Größe (cm)<input type="number" inputmode="numeric" id="s-h" value="${settings.heightCm??""}"></label>
       </div>
     </div>
+
+    ${reminderCard()}
 
     ${energyCard()}
 
@@ -1112,6 +1194,7 @@ function viewTools(v){
   $("#s-h").addEventListener("change", ()=>bindEnergy());
   $("#s-goal").addEventListener("change", ()=>bindEnergy());
   bindEnergy();
+  bindReminder();
 
   const calc = ()=>{
     const mg=num($("#c-mg").value), ml=num($("#c-ml").value), dose=num($("#c-dose").value), out=$("#calcOut");
